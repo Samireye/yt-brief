@@ -69,8 +69,44 @@ def video_id(url: str) -> str:
     raise ValueError("Could not find a YouTube video id in that link.")
 
 
+def fetch_via_supadata(vid: str, timestamps: bool) -> str:
+    """Hosted transcript API (not blocked on cloud hosts). Needs SUPADATA_API_KEY."""
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    q = urllib.parse.urlencode(
+        {"url": f"https://www.youtube.com/watch?v={vid}", "mode": "native", "text": "false"}
+    )
+    req = urllib.request.Request(
+        f"https://api.supadata.ai/v1/transcript?{q}",
+        headers={"x-api-key": os.environ["SUPADATA_API_KEY"]},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as r:
+            status, data = r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Supadata error {e.code}: {e.read()[:200].decode(errors='ignore')}")
+    if status != 200 or not isinstance(data.get("content"), list):
+        raise RuntimeError("No transcript available for this video.")
+    lines = []
+    for c in data["content"]:
+        t = " ".join(str(c.get("text", "")).split())
+        if not t:
+            continue
+        if timestamps:
+            m, sec = divmod(int(c.get("offset", 0)) // 1000, 60)
+            lines.append(f"[{m:02d}:{sec:02d}] {t}")
+        else:
+            lines.append(t)
+    return "\n".join(lines) if timestamps else " ".join(lines)
+
+
 def fetch_transcript(vid: str, timestamps: bool = False) -> str:
-    """Return the transcript as text. Works with both old and new youtube-transcript-api."""
+    """Return the transcript as text. Uses Supadata if configured, else youtube-transcript-api."""
+    if os.environ.get("SUPADATA_API_KEY"):
+        return fetch_via_supadata(vid, timestamps)
     from youtube_transcript_api import YouTubeTranscriptApi
 
     try:  # v1.x
@@ -164,7 +200,7 @@ def api_transcript(req: TranscriptReq):
     except Exception as e:  # transcripts disabled, blocked IP, no captions
         raise HTTPException(
             502,
-            f"Could not fetch a transcript ({type(e).__name__}). The video may have captions turned "
+            f"Could not fetch a transcript ({type(e).__name__}: {str(e)[:150]}). The video may have captions turned "
             "off, or YouTube may be blocking this network. You can paste a transcript manually.",
         )
     return {"id": vid, "transcript": text, "chars": len(text)}
